@@ -3,11 +3,16 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <functional>
+#include <mutex>
 #include <emscripten.h>
 #include <emscripten/val.h>
+#include <emscripten/bind.h>
 
 using namespace emscripten;
 using namespace std;
+
+typedef std::function<void(uint8_t reportId, std::vector<uint8_t> data)> HidReadCallback;
 
 struct hid_device_ {
 	val device_handle;
@@ -16,6 +21,7 @@ struct hid_device_ {
 	wstring last_error_str;
 };
 
+HidReadCallback global_hid_read_callback;
 static wstring last_global_error_str = L"";
 
 static void register_global_error(wstring msg)
@@ -30,6 +36,51 @@ static void register_device_error(hid_device *dev, wstring msg)
 {
 	dev->last_error_str = msg;
 }
+
+std::mutex callbackMutex;
+
+extern "C" {
+void module_export() {
+	cout << "Hehe\n";
+}
+}
+
+void hid_read_callback(emscripten::val device){
+	std::lock_guard<std::mutex> lock(callbackMutex);
+	cout << "Hehe\n";
+
+	/// more code just trying to log something to show it works
+	/*
+	uint8_t reportId = e["reportId"].as<uint8_t>();
+	std::vector<uint8_t> data;
+	
+	int result_length = e["data"]["byteLength"].as<int>();
+	for(int i=0; i<result_length-1; i++) {
+        data.push_back(e["data"].call<uint8_t>("getUint8", i));
+    }
+	*/
+
+	// global_hid_read_callback(reportId, data);
+	//cout << "Got data\n";
+}
+
+EMSCRIPTEN_BINDINGS(events){
+  	emscripten::function("hid_read_callback", hid_read_callback);
+}
+
+EM_JS(void, add_device_input_callback, (EM_VAL deviceHandle, void* usbHandle), {
+	device = Emval.toValue(deviceHandle);
+	console.log(device, usbHandle);
+
+	device.addEventListener("inputreport", (event) => {
+		// Module.hid_read_callback(device);
+		Module.ccall("module_export", 'void', []);
+
+		// callbackHandle(device, event);
+		// const { data, device, reportId } = event;
+		// console.log(data);
+	});
+});
 
 static wchar_t *utf8_to_wchar_t(const char *utf8)
 {
@@ -184,8 +235,11 @@ HID_API_EXPORT hid_device * HID_API_CALL hid_open_path(const char *path)
 		return NULL;
 	}
 
-    dev->device_handle = usb_device;
+	// usb_device.call<void>("addEventListener", std::string("inputreport"), val::module_property("hid_read_callback"));
 
+    dev->device_handle = usb_device;
+	add_device_input_callback(usb_device.as_handle(), (void*)dev);
+	
     return dev;
 }
 
@@ -213,9 +267,8 @@ int HID_API_EXPORT HID_API_CALL hid_get_feature_report(hid_device *dev, unsigned
     //     return -1;
     // }
 
-	printf("%d, %d", result_length, length);
+	
     for(int i=0; i<result_length-1; i++) {
-		printf("Byte %d\n", i);
         data[i] = result.call<uint8_t>("getUint8", i);
     }
 
@@ -224,14 +277,13 @@ int HID_API_EXPORT HID_API_CALL hid_get_feature_report(hid_device *dev, unsigned
 
 int HID_API_EXPORT HID_API_CALL hid_send_feature_report(hid_device *dev, const unsigned char *data, size_t length)
 {
-	// vector<unsigned char> report_data(length);
-	// for(int x=0; x<length; x++) {
-	// 	report_data[x] = data[x+1];
-	// }
+	auto result = dev->device_handle.call<val>(
+		"sendFeatureReport",
+		data[0],
+		val(typed_memory_view(length-1, data))
+	).await();
 
-	// auto result = dev->device_handle.call<val>("sendFeatureReport", data[0], report_data).await();
-
-    return 0;
+    return length;
 }
 
 const wchar_t * HID_API_EXPORT HID_API_CALL hid_error(hid_device *dev)
@@ -249,6 +301,12 @@ const wchar_t * HID_API_EXPORT HID_API_CALL hid_error(hid_device *dev)
 int HID_API_EXPORT HID_API_CALL hid_read(hid_device *dev, unsigned char *data, size_t length)
 {
 	return hid_get_feature_report(dev, data, length);
+}
+
+
+int HID_API_EXPORT HID_API_CALL hid_read_register(HidReadCallback callback)
+{
+	global_hid_read_callback = callback;
 }
 
 int HID_API_EXPORT HID_API_CALL hid_write(hid_device *dev, const unsigned char *data, size_t length)
