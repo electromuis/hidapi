@@ -3,11 +3,16 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <functional>
+#include <mutex>
 #include <emscripten.h>
 #include <emscripten/val.h>
+#include <emscripten/bind.h>
 
 using namespace emscripten;
 using namespace std;
+
+typedef std::function<void(uint8_t reportId, std::vector<uint8_t> data)> HidReadCallback;
 
 struct hid_device_ {
 	val device_handle;
@@ -16,6 +21,7 @@ struct hid_device_ {
 	wstring last_error_str;
 };
 
+HidReadCallback global_hid_read_callback;
 static wstring last_global_error_str = L"";
 
 static void register_global_error(wstring msg)
@@ -30,6 +36,14 @@ static void register_device_error(hid_device *dev, wstring msg)
 {
 	dev->last_error_str = msg;
 }
+
+EM_JS(EM_VAL, device_hook, (EM_VAL deviceHandle), {
+	const device = Emval.toValue(deviceHandle);
+
+	device.addEventListener('inputreport', event => {
+		device.lastEvent = event;
+	});
+});
 
 static wchar_t *utf8_to_wchar_t(const char *utf8)
 {
@@ -105,6 +119,7 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 
         string productName = usb_device["productName"].as<string>();
         cur_dev->product_string = utf8_to_wchar_t(productName.c_str());
+		cur_dev->manufacturer_string = L"Unknown";
 
         string path = to_string(i);
         cur_dev->path = (char*)calloc(path.length(), sizeof(char));
@@ -117,16 +132,18 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 void  HID_API_EXPORT HID_API_CALL hid_free_enumeration(struct hid_device_info *devs)
 {
 	/* TODO: Merge this with the Linux version. This function is platform-independent. */
+	
 	struct hid_device_info *d = devs;
 	while (d) {
 		struct hid_device_info *next = d->next;
-		free(d->path);
-		free(d->serial_number);
-		free(d->manufacturer_string);
-		free(d->product_string);
+		//free(d->path);
+		//free(d->serial_number);
+		//free(d->manufacturer_string);
+		//free(d->product_string);
 		free(d);
 		d = next;
 	}
+	
 }
 
 hid_device * hid_open(unsigned short vendor_id, unsigned short product_id, const wchar_t *serial_number)
@@ -194,7 +211,8 @@ HID_API_EXPORT hid_device * HID_API_CALL hid_open_path(const char *path)
 	}
 
     dev->device_handle = usb_device;
-
+	device_hook(dev->device_handle.as_handle());
+	
     return dev;
 }
 
@@ -215,16 +233,8 @@ int HID_API_EXPORT HID_API_CALL hid_get_feature_report(hid_device *dev, unsigned
 {
     auto result = dev->device_handle.call<val>("receiveFeatureReport", data[0]).await();
     int result_length = result["byteLength"].as<int>();
-
-    // if(result_length != length) {
-	// 	printf("%d, %d", result_length, length);
-    //     register_global_error(L"hid_get_feature_report report length not matching");
-    //     return -1;
-    // }
-
-	printf("%d, %d", result_length, length);
+	
     for(int i=0; i<result_length-1; i++) {
-		printf("Byte %d\n", i);
         data[i] = result.call<uint8_t>("getUint8", i);
     }
 
@@ -233,14 +243,13 @@ int HID_API_EXPORT HID_API_CALL hid_get_feature_report(hid_device *dev, unsigned
 
 int HID_API_EXPORT HID_API_CALL hid_send_feature_report(hid_device *dev, const unsigned char *data, size_t length)
 {
-	// vector<unsigned char> report_data(length);
-	// for(int x=0; x<length; x++) {
-	// 	report_data[x] = data[x+1];
-	// }
+	auto result = dev->device_handle.call<val>(
+		"sendFeatureReport",
+		data[0],
+		val(typed_memory_view(length-1, &data[1]))
+	).await();
 
-	// auto result = dev->device_handle.call<val>("sendFeatureReport", data[0], report_data).await();
-
-    return 0;
+    return length;
 }
 
 const wchar_t * HID_API_EXPORT HID_API_CALL hid_error(hid_device *dev)
@@ -257,7 +266,29 @@ const wchar_t * HID_API_EXPORT HID_API_CALL hid_error(hid_device *dev)
 
 int HID_API_EXPORT HID_API_CALL hid_read(hid_device *dev, unsigned char *data, size_t length)
 {
-	return hid_get_feature_report(dev, data, length);
+	if(!dev->device_handle["lastEvent"]) {
+		return 0;
+	}
+
+	val resultEvent = dev->device_handle["lastEvent"];
+	int result_length = resultEvent["data"]["byteLength"].as<int>();
+	if(result_length == 0)
+		return 0;
+
+	dev->device_handle.set("lastEvent", val::undefined());
+
+	data[0] = resultEvent["reportId"].as<uint8_t>();
+    for(int i=0; i<result_length-1; i++) {
+        data[i+1] = resultEvent["data"].call<uint8_t>("getUint8", i);
+    }
+
+	return result_length+1;
+}
+
+
+int HID_API_EXPORT HID_API_CALL hid_read_register(HidReadCallback callback)
+{
+	global_hid_read_callback = callback;
 }
 
 int HID_API_EXPORT HID_API_CALL hid_write(hid_device *dev, const unsigned char *data, size_t length)
