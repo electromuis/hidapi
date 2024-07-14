@@ -80,6 +80,11 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
     struct hid_device_info *cur_dev = NULL;
     struct hid_device_info *tmp = NULL;
 
+	if(!val::global("navigator")["hid"]) {
+		register_global_error(L"WebHID not supported by browser");
+		return root;
+	}
+
     auto usb_devices = val::global("navigator")["hid"].call<val>("getDevices").await();
     uint8_t devices_num = usb_devices["length"].as<uint8_t>();
     for (uint8_t i = 0; i < devices_num; i++) {
@@ -169,6 +174,10 @@ hid_device * hid_open(unsigned short vendor_id, unsigned short product_id, const
 
 HID_API_EXPORT hid_device * HID_API_CALL hid_open_path(const char *path)
 {
+	if(!val::global("navigator")["hid"]) {
+		return NULL;
+	}
+	
     auto usb_devices = val::global("navigator")["hid"].call<val>("getDevices").await();
     uint8_t devices_num = usb_devices["length"].as<uint8_t>();
     int num = stoi(path);
